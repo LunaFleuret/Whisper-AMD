@@ -6,7 +6,7 @@ cd /d "%~dp0"
 echo ==========================================
 echo  Whisper Transcription (Radeon / Vulkan)
 echo  GPU: AMD Radeon (Vulkan Acceleration)
-echo  Model: large-v3-turbo (Smart 2-Chunks)
+echo  Model: large-v3-turbo (Smart 4-Chunks)
 echo ==========================================
 echo.
 echo Starting batch transcription...

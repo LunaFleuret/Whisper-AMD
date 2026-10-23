@@ -116,9 +116,10 @@ def get_audio_duration(file_path):
     res = subprocess.run(cmd, capture_output=True, text=True, check=True)
     return float(res.stdout.strip())
 
-def find_silence_split_point(input_file, total_duration):
-    mid = total_duration / 2.0
-    search_start = max(0.0, mid - 25.0)
+def find_silence_split_point(input_file, total_duration, target_sec=None):
+    if target_sec is None:
+        target_sec = total_duration / 2.0
+    search_start = max(0.0, target_sec - 25.0)
     search_dur = min(50.0, total_duration - search_start)
     cmd = [
         "ffmpeg", "-ss", f"{search_start:.2f}", "-t", f"{search_dur:.2f}",
@@ -129,9 +130,9 @@ def find_silence_split_point(input_file, total_duration):
     starts = re.findall(r"silence_start:\s*([0-9.]+)", res.stderr)
     if starts:
         candidates = [search_start + float(s) for s in starts]
-        candidates.sort(key=lambda x: abs(x - mid))
+        candidates.sort(key=lambda x: abs(x - target_sec))
         return candidates[0]
-    return mid
+    return target_sec
 
 def parse_srt_file(srt_path, offset_ms=0):
     if not os.path.exists(srt_path):
@@ -301,7 +302,7 @@ def transcribe_single(input_file, model_key, output_dir=None, beam_size=None):
                 except Exception:
                     pass
 
-def transcribe_parallel(input_file, model_key, output_dir=None, beam_size=None):
+def transcribe_parallel(input_file, model_key, output_dir=None, beam_size=None, num_chunks=4):
     start_time = time.time()
     
     if beam_size is None:
@@ -319,46 +320,48 @@ def transcribe_parallel(input_file, model_key, output_dir=None, beam_size=None):
         print(f"※音声長が短いため（{total_duration:.1f}秒）、単一プロセス処理に切り替えます。")
         return transcribe_single(input_file, model_key, output_dir=output_dir, beam_size=beam_size)
 
-    print(f"\n2分割並列処理を開始します (英語モード): {os.path.basename(input_file)}")
+    print(f"\n{num_chunks}分割並列処理を開始します (英語モード): {os.path.basename(input_file)}")
     print(f"  全体長    : {format_duration_ja(total_duration)} ({total_duration:.1f}秒)")
     
-    split_sec = find_silence_split_point(input_file, total_duration)
-    print(f"  無音分割点: {format_duration_ja(split_sec)} ({split_sec:.2f}秒)")
-    print(f"    - 前半チャンク: 0.0秒 ~ {split_sec:.2f}秒 ({split_sec:.1f}秒)")
-    print(f"    - 後半チャンク: {split_sec:.2f}秒 ~ {total_duration:.2f}秒 ({total_duration - split_sec:.1f}秒)")
+    # 各分割点を検出
+    split_points = [0.0]
+    for i in range(1, num_chunks):
+        target = total_duration * (i / float(num_chunks))
+        pt = find_silence_split_point(input_file, total_duration, target_sec=target)
+        split_points.append(pt)
+    split_points.append(total_duration)
+
+    print(f"  無音分割数: {num_chunks} チャンク")
+    for i in range(num_chunks):
+        s_from = split_points[i]
+        s_to = split_points[i + 1]
+        print(f"    - チャンク{i+1}: {s_from:.2f}秒 ~ {s_to:.2f}秒 ({s_to - s_from:.1f}秒)")
 
     pid = os.getpid()
-    c1_wav = os.path.join(file_dir, f"temp_whisper_c1_{pid}.wav")
-    c2_wav = os.path.join(file_dir, f"temp_whisper_c2_{pid}.wav")
-    s1_base = os.path.join(file_dir, f"temp_whisper_out1_{pid}")
-    s2_base = os.path.join(file_dir, f"temp_whisper_out2_{pid}")
-    s1_path = s1_base + ".srt"
-    s2_path = s2_base + ".srt"
+    wav_files = [os.path.join(file_dir, f"temp_whisper_c{i+1}_{pid}.wav") for i in range(num_chunks)]
+    out_bases = [os.path.join(file_dir, f"temp_whisper_out{i+1}_{pid}") for i in range(num_chunks)]
+    srt_paths = [b + ".srt" for b in out_bases]
 
     audio_filter = "highpass=f=80,lowpass=f=7500,afftdn=nf=-25,dynaudnorm=f=150:g=25:p=0.95:m=20.0"
 
     try:
-        print("  [1/3] 音声抽出・音響最適化中 (2チャンク並行)...")
+        print(f"  [1/3] 音声抽出・音響最適化中 ({num_chunks}チャンク並行)...")
         t_ff_start = time.time()
-        cmd1 = [
-            "ffmpeg", "-ss", "0.0", "-to", f"{split_sec:.3f}", "-i", input_file,
-            "-af", audio_filter, "-ar", "16000", "-ac", "1", "-c:a", "pcm_s16le",
-            "-y", c1_wav
-        ]
-        cmd2 = [
-            "ffmpeg", "-ss", f"{split_sec:.3f}", "-to", f"{total_duration:.3f}", "-i", input_file,
-            "-af", audio_filter, "-ar", "16000", "-ac", "1", "-c:a", "pcm_s16le",
-            "-y", c2_wav
-        ]
         
-        def run_ffmpeg(cmd):
+        def run_ffmpeg_chunk(idx):
+            s_from = split_points[idx]
+            s_to = split_points[idx + 1]
+            cmd = [
+                "ffmpeg", "-ss", f"{s_from:.3f}", "-to", f"{s_to:.3f}", "-i", input_file,
+                "-af", audio_filter, "-ar", "16000", "-ac", "1", "-c:a", "pcm_s16le",
+                "-y", wav_files[idx]
+            ]
             subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
-        with ThreadPoolExecutor(max_workers=2) as ex:
-            f1 = ex.submit(run_ffmpeg, cmd1)
-            f2 = ex.submit(run_ffmpeg, cmd2)
-            f1.result()
-            f2.result()
+        with ThreadPoolExecutor(max_workers=num_chunks) as ex:
+            futures = [ex.submit(run_ffmpeg_chunk, i) for i in range(num_chunks)]
+            for f in futures:
+                f.result()
         print(f"  FFmpeg抽出完了 ({time.time() - t_ff_start:.2f}秒)")
 
         exe_path = os.path.join(BIN_DIR, EXE_NAME)
@@ -368,9 +371,9 @@ def transcribe_parallel(input_file, model_key, output_dir=None, beam_size=None):
         env = os.environ.copy()
         env["GGML_VULKAN_DEVICE"] = "0"
         
-        threads_per_chunk = max(4, CPU_THREADS // 2)
+        threads_per_chunk = max(2, CPU_THREADS // num_chunks)
 
-        print(f"  [2/3] Radeon GPU (Vulkan) 並列文字起こし実行中 (英語モード / 2プロセス x {threads_per_chunk}スレッド)...")
+        print(f"  [2/3] Radeon GPU (Vulkan) 並列文字起こし実行中 (英語モード / {num_chunks}プロセス x {threads_per_chunk}スレッド)...")
 
         def run_whisper(wav_file, out_base):
             cmd = [
@@ -390,17 +393,18 @@ def transcribe_parallel(input_file, model_key, output_dir=None, beam_size=None):
             subprocess.run(cmd, check=True, env=env)
 
         t_inf_start = time.time()
-        with ThreadPoolExecutor(max_workers=2) as ex:
-            f1 = ex.submit(run_whisper, c1_wav, s1_base)
-            f2 = ex.submit(run_whisper, c2_wav, s2_base)
-            f1.result()
-            f2.result()
+        with ThreadPoolExecutor(max_workers=num_chunks) as ex:
+            futures = [ex.submit(run_whisper, wav_files[i], out_bases[i]) for i in range(num_chunks)]
+            for f in futures:
+                f.result()
         print(f"  Whisper並列推論完了 ({time.time() - t_inf_start:.2f}秒)")
 
         print("  [3/3] 結果をマージしてMarkdownを生成中...")
-        segs1 = parse_srt_file(s1_path, offset_ms=0)
-        segs2 = parse_srt_file(s2_path, offset_ms=int(split_sec * 1000))
-        transcription = segs1 + segs2
+        transcription = []
+        for i in range(num_chunks):
+            offset_ms = int(split_points[i] * 1000)
+            segs = parse_srt_file(srt_paths[i], offset_ms=offset_ms)
+            transcription.extend(segs)
 
         if not transcription:
             print("エラー: 文字起こし結果が空でした。")
@@ -410,23 +414,23 @@ def transcribe_parallel(input_file, model_key, output_dir=None, beam_size=None):
         elapsed_sec = time.time() - start_time
         return save_markdown_output(transcription, full_text_list, input_file, model_key, elapsed_sec, file_dir, base_name, output_dir)
     finally:
-        for tmp in [c1_wav, c2_wav, s1_path, s2_path]:
+        for tmp in wav_files + srt_paths:
             if os.path.exists(tmp):
                 try:
                     os.remove(tmp)
                 except Exception:
                     pass
 
-def transcribe(input_file, model_key, output_dir=None, beam_size=None, num_chunks=2):
+def transcribe(input_file, model_key, output_dir=None, beam_size=None, num_chunks=4):
     if not os.path.exists(input_file):
         print(f"エラー: 入力ファイル '{input_file}' が見つかりません。")
         sys.exit(1)
-    if num_chunks == 2:
-        return transcribe_parallel(input_file, model_key, output_dir=output_dir, beam_size=beam_size)
+    if num_chunks > 1:
+        return transcribe_parallel(input_file, model_key, output_dir=output_dir, beam_size=beam_size, num_chunks=num_chunks)
     else:
         return transcribe_single(input_file, model_key, output_dir=output_dir, beam_size=beam_size)
 
-def process_folder(model_key, beam_size=None, num_chunks=2):
+def process_folder(model_key, beam_size=None, num_chunks=4):
     os.makedirs(ORIGINAL_DIR, exist_ok=True)
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     
@@ -480,9 +484,9 @@ if __name__ == "__main__":
     parser.add_argument(
         "--chunks", "-c",
         type=int,
-        choices=[1, 2],
-        default=2,
-        help="分割並列処理のチャンク数 (1: 通常, 2: 2分割並列, デフォルト: 2)"
+        choices=list(range(1, 9)),
+        default=4,
+        help="分割並列処理のチャンク数 (1: 通常, 2〜8: N分割並列, デフォルト: 4)"
     )
     parser.add_argument(
         "--single",
