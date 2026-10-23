@@ -13,54 +13,20 @@ from datetime import timedelta
 from concurrent.futures import ThreadPoolExecutor
 
 WHISPER_REPO = "Const-me/Whisper"
-# モデル・バイナリの保存先 (プロジェクト直下の models フォルダをデフォルトとし、C:\AI-Models があれば優先)
+# モデル・バイナリの保存先 (プロジェクト直下の Whisper-models / bin フォルダ)
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-_SHARED_MODELS_DIR = r"C:\AI-Models\Whisper-Models"
-if os.path.exists(_SHARED_MODELS_DIR):
-    MODELS_DIR = _SHARED_MODELS_DIR
-else:
-    MODELS_DIR = os.path.join(BASE_DIR, "models")
-BIN_DIR = os.path.join(MODELS_DIR, "bin")
+BIN_DIR = os.path.join(BASE_DIR, "bin")
+MODELS_DIR = os.path.join(BIN_DIR, "Whisper-models")
 
-# CPUスレッド数（i7-11700物理8コアに最適化。オーバーヘッドを削減）
-CPU_THREADS = 8
+# 推論に使用するCPUスレッド数
+CPU_THREADS = min(8, os.cpu_count() or 8)
 
 # サポートするモデルの定義
 MODELS = {
-    "tiny": {
-        "url": "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny.bin",
-        "name": "ggml-tiny.bin",
-        "min_size": 70000000  # 約70MB
-    },
-    "base": {
-        "url": "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.bin",
-        "name": "ggml-base.bin",
-        "min_size": 140000000  # 約140MB
-    },
-    "small": {
-        "url": "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.bin",
-        "name": "ggml-small.bin",
-        "min_size": 460000000  # 約460MB
-    },
-    "medium": {
-        "url": "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-medium.bin",
-        "name": "ggml-medium.bin",
-        "min_size": 1400000000  # 約1.4GB
-    },
     "large-v3-turbo": {
         "url": "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-turbo.bin",
         "name": "ggml-large-v3-turbo.bin",
         "min_size": 1600000000  # 約1.6GB
-    },
-    "large-v3-turbo-q5_0": {
-        "url": "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-turbo-q5_0.bin",
-        "name": "ggml-large-v3-turbo-q5_0.bin",
-        "min_size": 550000000  # 約550MB
-    },
-    "large-v3": {
-        "url": "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3.bin",
-        "name": "ggml-large-v3.bin",
-        "min_size": 3090000000  # 約3.09GB
     },
 }
 DEFAULT_MODEL = "large-v3-turbo"
@@ -69,7 +35,6 @@ VULKAN_ENGINE_URL = "https://github.com/eviscerations/whisper-windows-mcp/releas
 
 ORIGINAL_DIR = os.path.join(BASE_DIR, "Original")
 OUTPUT_DIR = os.path.join(BASE_DIR, "Output")
-PROCESSED_DIR = os.path.join(BASE_DIR, "Processed")
 
 def download_file(url, dest_path):
     print(f"ダウンロード中: {url}")
@@ -199,8 +164,6 @@ def save_markdown_output(transcription, full_text_list, input_file, model_key, e
     out_dir = output_dir if output_dir else file_dir
 
     model_short_names = {
-        "large-v3": "v3",
-        "large-v3-turbo-q5_0": "v3-Q5",
         "large-v3-turbo": "v3-T",
     }
     model_short = model_short_names.get(model_key, model_key)
@@ -228,11 +191,14 @@ def save_markdown_output(transcription, full_text_list, input_file, model_key, e
     full_text = " ".join(full_text_list)
     char_count = len(full_text.replace(" ", ""))
 
+    audio_sec = total_ms / 1000.0
+    speed_factor = (audio_sec / elapsed_sec) if elapsed_sec > 0 else 0
     duration_str = format_duration_ja(elapsed_sec)
-    audio_duration_str = format_duration_ja(total_ms / 1000.0)
+    audio_duration_str = format_duration_ja(audio_sec)
     print(f"\n文字起こし完了 (英語):")
     print(f"  処理時間 : {duration_str} ({elapsed_sec:.2f}秒)")
     print(f"  音声時間 : {audio_duration_str}")
+    print(f"  処理速度 : 約 {speed_factor:.1f} 倍速 (1秒あたり 約 {speed_factor / 60.0:.2f} 分)")
     print(f"  文字数   : {char_count} 文字")
     print(f"  出力先   : {output_md_path}")
 
@@ -248,7 +214,7 @@ def transcribe_single(input_file, model_key, output_dir=None, beam_size=None):
     start_time = time.time()
     
     if beam_size is None:
-        beam_size = 8 if model_key == "large-v3" else 2
+        beam_size = 2
     else:
         beam_size = min(beam_size, 8)
         
@@ -339,7 +305,7 @@ def transcribe_parallel(input_file, model_key, output_dir=None, beam_size=None):
     start_time = time.time()
     
     if beam_size is None:
-        beam_size = 8 if model_key == "large-v3" else 2
+        beam_size = 2
     else:
         beam_size = min(beam_size, 8)
 
@@ -463,7 +429,6 @@ def transcribe(input_file, model_key, output_dir=None, beam_size=None, num_chunk
 def process_folder(model_key, beam_size=None, num_chunks=2):
     os.makedirs(ORIGINAL_DIR, exist_ok=True)
     os.makedirs(OUTPUT_DIR, exist_ok=True)
-    os.makedirs(PROCESSED_DIR, exist_ok=True)
     
     supported_extensions = ('.mp4', '.mkv', '.avi', '.mov', '.mp3', '.wav', '.m4a', '.flv', '.webm', '.aac', '.ogg')
     files = [f for f in os.listdir(ORIGINAL_DIR) if f.lower().endswith(supported_extensions)]

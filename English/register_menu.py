@@ -22,11 +22,6 @@ from tkinter import messagebox
 MENU_TITLE = "Whisperで文字起こし【英語】"
 REG_KEY_NAME = "WhisperTranscribeEnglish"
 
-MODELS = [
-    ("large-v3-turbo", "large-v3-turbo (Standard Fast)"),
-    ("large-v3-turbo-q5_0", "large-v3-turbo-q5_0 (Recommended / Ultra Fast)"),
-    ("large-v3", "large-v3 (Best Accuracy / Slower)"),
-]
 
 TARGET_EXTENSIONS = [
     ".mp4", ".mkv", ".mov", ".avi", ".webm",
@@ -50,40 +45,29 @@ def get_python_exe():
 # レジストリ操作
 # ─────────────────────────────────────────────
 def register_context_menu():
-    """右クリックメニューをレジストリに登録"""
-    unregister_context_menu()  # 古いキーや重複項目を完全にクリーンアップ
+    """右クリックメニューをレジストリに登録 (ワンクリック直行実行)"""
+    unregister_context_menu()  # 古いキーや重複項目をクリーンアップ
     script_path = get_script_path()
     python_exe = get_python_exe()
     
     if not os.path.exists(script_path):
         raise FileNotFoundError(f"スクリプトが見つかりません: {script_path}")
 
-    targets = [f"SystemFileAssociations\\{ext}" for ext in TARGET_EXTENSIONS]
+    targets = [fr"SystemFileAssociations\{ext}" for ext in TARGET_EXTENSIONS]
     targets.append("Directory")  # フォルダの右クリックにも対応
 
     for target_base in targets:
-        main_key_path = f"Software\\Classes\\{target_base}\\shell\\{REG_KEY_NAME}"
+        main_key_path = fr"Software\Classes\{target_base}\shell\{REG_KEY_NAME}"
+        command_key_path = fr"{main_key_path}\command"
         
-        # 親キー登録 ("Whisperで文字起こし【英語】")
+        # 親キー登録
         with winreg.CreateKey(winreg.HKEY_CURRENT_USER, main_key_path) as key:
             winreg.SetValueEx(key, "MUIVerb", 0, winreg.REG_SZ, MENU_TITLE)
-            winreg.SetValueEx(key, "SubCommands", 0, winreg.REG_SZ, "")
             
-        sub_shell_path = f"{main_key_path}\\shell"
-        
-        for idx, (model_key, model_label) in enumerate(MODELS, start=1):
-            item_key_path = f"{sub_shell_path}\\Item{idx}_{model_key}"
-            command_key_path = f"{item_key_path}\\command"
-            
-            # 各モデル用サブメニュー設定
-            with winreg.CreateKey(winreg.HKEY_CURRENT_USER, item_key_path) as item_key:
-                winreg.SetValueEx(item_key, "", 0, winreg.REG_SZ, model_label)
-                
-            # コマンド設定
-            # cmd /k で実行し、結果表示後にウィンドウが残るように設定
-            cmd_str = f'cmd.exe /k ""{python_exe}" "{script_path}" --model "{model_key}" "%1""'
-            with winreg.CreateKey(winreg.HKEY_CURRENT_USER, command_key_path) as cmd_key:
-                winreg.SetValueEx(cmd_key, "", 0, winreg.REG_SZ, cmd_str)
+        # 直接実行コマンド設定
+        cmd_str = f'cmd.exe /k ""{python_exe}" "{script_path}" "%1""'
+        with winreg.CreateKey(winreg.HKEY_CURRENT_USER, command_key_path) as cmd_key:
+            winreg.SetValueEx(cmd_key, "", 0, winreg.REG_SZ, cmd_str)
 
 def unregister_context_menu():
     """右クリックメニューをレジストリから削除"""

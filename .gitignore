@@ -1,13 +1,15 @@
 # Models and Binaries (Auto-downloaded)
+bin/
 models/
+Whisper-models/
 *.bin
 whisper-cli.exe
 *.zip
+*.dll
 
 # Folders for processing
 Original/
 Output/
-Processed/
 
 # Temporary files
 temp_whisper_*
@@ -22,3 +24,7 @@ __pycache__/
 .DS_Store
 Thumbs.db
 Desktop.ini
+# AI Assistant docs
+Gemini.md
+GEmini.md
+Claude.md
